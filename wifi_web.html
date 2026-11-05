@@ -1,0 +1,513 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WiFi Analyzer</title>
+<style>
+  :root {
+    --fs: 14px;
+    --bg: #f4f5f7; --panel: #ffffff; --line: #d8dbe0; --text: #1c2230; --muted: #626a7a;
+    --accent: #2457c5; --accent-text: #ffffff; --live: #1f7a3a; --pb: #b03030;
+    --row-ok: #e3f5e3; --row-co: #fff3c8; --row-pa: #f9d9d9; --row-sel: #c9dcff; --weak: #9aa0aa;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: var(--fs)/1.45 system-ui, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 1.15em; margin: 0; }
+  .badge { font-size: .8em; font-weight: 700; letter-spacing: .04em; color: #fff; padding: 2px 8px; border-radius: 10px; background: var(--live); }
+  .badge.pb { background: var(--pb); }
+  .muted { color: var(--muted); }
+  .spacer { flex: 1; }
+  #notifyStatus.ok { color: var(--live); } #notifyStatus.err { color: var(--pb); }
+  #offline { background: var(--pb); color: #fff; padding: 4px 16px; }
+  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .bar[hidden], [hidden] { display: none !important; }
+  .grp { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  button, select, input { font: inherit; color: inherit; }
+  button { padding: 4px 12px; border: 1px solid var(--line); border-radius: 6px; background: #f8f9fb; cursor: pointer; }
+  button:hover:not(:disabled) { background: #eceff4; }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=number] { width: 5.2em; padding: 2px 4px; border: 1px solid var(--line); border-radius: 4px; }
+  input[type=text], input.path { padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; min-width: 18em; }
+  input[type=range] { flex: 1; min-width: 160px; }
+  .icon { min-width: 2.4em; padding: 4px 6px; }
+  details.menu { position: relative; }
+  details.menu summary { list-style: none; cursor: pointer; padding: 4px 12px; border: 1px solid var(--line); border-radius: 6px; background: #f8f9fb; }
+  details.menu summary::-webkit-details-marker { display: none; }
+  details.menu > div { position: absolute; z-index: 10; top: calc(100% + 4px); left: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.12); padding: 8px 12px; display: grid; gap: 4px; min-width: 14em; }
+  a.btnlink { color: var(--accent); text-decoration: none; }
+  #chartWrap { padding: 10px 16px 0; }
+  #chart { display: block; width: 100%; height: 480px; object-fit: contain; background: #fff; border: 1px solid var(--line); border-radius: 6px; }
+  #chartGrip { height: 14px; margin: 2px 0 0; cursor: row-resize; display: flex; align-items: center; justify-content: center; touch-action: none; border-radius: 6px; }
+  #chartGrip::before { content: ""; width: 64px; height: 4px; border-radius: 2px; background: #b9bec8; }
+  #chartGrip:hover::before, #chartGrip:focus-visible::before, #chartGrip.drag::before { background: var(--accent); }
+  #chartGrip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  body.resizing { cursor: row-resize; user-select: none; }
+  .legend { margin: 6px 16px; color: var(--muted); font-size: .9em; }
+  .legend span { display: inline-block; width: .9em; height: .9em; border-radius: 2px; vertical-align: -1px; margin: 0 3px 0 8px; border: 1px solid var(--line); }
+  #tableWrap { margin: 0 16px 16px; overflow: auto; max-height: 55vh; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: 4px 10px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+  td.detail { white-space: normal; min-width: 24em; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th { position: sticky; top: 0; background: #eef0f4; cursor: pointer; user-select: none; z-index: 1; }
+  th.sorted::after { content: " \25BC"; font-size: .75em; } th.sorted.asc::after { content: " \25B2"; }
+  tr.ok { background: var(--row-ok); } tr.cochannel { background: var(--row-co); } tr.partial { background: var(--row-pa); }
+  tr.weak { color: var(--weak); }
+  tr.sel { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--row-sel); }
+  tbody tr { cursor: pointer; }
+  dialog { border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; max-width: min(720px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgba(20, 24, 33, .35); }
+  dialog h2 { margin: 0 0 10px; font-size: 1.15em; }
+  dialog fieldset { border: 1px solid var(--line); border-radius: 6px; margin: 12px 0 0; padding: 8px 12px; display: grid; gap: 6px; }
+  dialog .hint { color: var(--muted); font-size: .88em; margin: 4px 0 0; }
+  dialog .actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  dialog .error { color: var(--pb); min-height: 1.2em; margin: 8px 0 0; }
+  #toast { position: fixed; right: 16px; bottom: 16px; max-width: min(520px, calc(100vw - 32px)); padding: 10px 14px; border-radius: 8px; color: #fff; background: #2b3242; box-shadow: 0 6px 20px rgba(0,0,0,.2); opacity: 0; transition: opacity .25s; pointer-events: none; }
+  #toast.show { opacity: 1; } #toast.err { background: var(--pb); } #toast.ok { background: var(--live); }
+  @media (max-width: 700px) { input[type=text], input.path { min-width: 0; width: 100%; } .bar { padding: 8px 12px; } #tableWrap, .legend { margin-left: 12px; margin-right: 12px; } #chartWrap { padding: 10px 12px 0; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>WiFi Analyzer</h1>
+  <span id="badge" class="badge">LIVE</span>
+  <span id="status" class="muted"></span>
+  <span class="spacer"></span>
+  <span id="notifyStatus"></span>
+</header>
+<div id="offline" hidden>Connessione al servizio persa, nuovo tentativo in corso...</div>
+
+<div class="bar" id="liveBar">
+  <button id="btnScan" class="primary">Scansiona ora</button>
+  <label class="grp"><input type="checkbox" id="autoScan"> Aggiorna ogni <input type="number" id="interval" min="5" max="3600" step="5"> s</label>
+  <span id="nextScan" class="muted"></span>
+  <span class="grp"><label class="grp"><input type="checkbox" id="saveCsv"> Salva CSV in</label><input type="text" id="saveDir" class="path" spellcheck="false"></span>
+  <button id="btnPlayback">Playback...</button>
+</div>
+
+<div class="bar" id="pbBar" hidden>
+  <span class="badge pb">PLAYBACK</span>
+  <button class="icon" data-pb="first" title="Primo">&#x23EE;</button>
+  <button class="icon" data-pb="prev" title="Precedente (freccia sinistra)">&#x25C0;</button>
+  <button id="btnPlay" title="Play / pausa (spazio)">&#x25B6; Play</button>
+  <button class="icon" data-pb="next" title="Successivo (freccia destra)">&#x25B6;</button>
+  <button class="icon" data-pb="last" title="Ultimo">&#x23ED;</button>
+  <input type="range" id="pbSlider" min="0" max="0" value="0" aria-label="Posizione nel tempo">
+  <span id="pbLabel"></span>
+  <label class="grp"><input type="number" id="pbSpeed" min="0.1" max="60" step="0.2"> s/passo</label>
+  <button data-pb="reload">Aggiorna elenco</button>
+  <button id="btnLive">Torna al live</button>
+</div>
+
+<div class="bar">
+  <label class="grp">Ignora sotto <input type="number" id="minRssi" min="-100" max="-30" step="5"> dBm</label>
+  <label class="grp"><input type="checkbox" id="group"> Raggruppa SSID dello stesso AP</label>
+  <span class="grp" id="bandBoxes"></span>
+  <label class="grp"><input type="checkbox" id="showUtil"> Utilizzo canale</label>
+  <label class="grp">Testo <select id="fontSize"></select></label>
+  <details class="menu" id="colMenuWrap"><summary>Colonne</summary><div id="colMenu"></div></details>
+  <a class="btnlink" href="/api/table.csv" download>Scarica CSV</a>
+  <button id="btnNotify">Notifiche Teams...</button>
+</div>
+
+<div id="chartWrap">
+  <img id="chart" alt="Grafico delle reti Wi-Fi per canale">
+  <div id="chartGrip" role="separator" aria-orientation="horizontal" tabindex="0"
+       aria-label="Altezza del grafico"
+       title="Trascina per cambiare l'altezza del grafico (frecce su/giu' da tastiera, doppio clic: altezza automatica)"></div>
+</div>
+<p class="legend">
+  <span style="background:var(--row-ok)"></span>canale libero
+  <span style="background:var(--row-co)"></span>stesso canale di altre reti (si dividono il tempo di trasmissione)
+  <span style="background:var(--row-pa)"></span>sovrapposizione parziale (interferenza).
+  Utilizzo canale: % di tempo in cui l'AP sente il canale occupato, solo per gli AP che lo dichiarano.
+  Clicca una riga per evidenziarla nel grafico, Esc per deselezionare.
+</p>
+<div id="tableWrap"><table><thead><tr id="thead"></tr></thead><tbody id="tbody"></tbody></table></div>
+
+<dialog id="pbDialog">
+  <h2>Playback dei salvataggi</h2>
+  <label>Cartella sul PC del servizio con i file wifi_scan_*.csv<br>
+    <input type="text" id="pbDir" class="path" style="width:100%" spellcheck="false"></label>
+  <p class="error" id="pbError"></p>
+  <div class="actions"><button id="pbCancel">Annulla</button><button id="pbOpen" class="primary">Apri</button></div>
+</dialog>
+
+<dialog id="notifyDialog">
+  <h2>Notifiche Microsoft Teams</h2>
+  <label>URL del webhook Teams<br><input type="text" id="nUrl" style="width:100%" spellcheck="false" autocomplete="off"></label>
+  <p class="hint">In Teams: sul canale scegli ... &gt; Workflows &gt; "Post to a channel when a webhook request is received" e copia qui l'URL. Chi conosce l'URL puo' scrivere nel canale.</p>
+  <p class="hint" id="nEnvHint" hidden>Campo vuoto: viene usato l'URL nella variabile d'ambiente WIFI_ANALYZER_TEAMS_WEBHOOK.</p>
+  <label class="grp" style="margin-top:8px"><input type="checkbox" id="nImage"> Allega l'immagine del grafico (ridotta per il limite di ~28 KB di Teams)</label>
+  <fieldset><legend>Riepilogo periodico</legend>
+    <label class="grp"><input type="checkbox" id="nReport"> Invia un riepilogo ogni <input type="number" id="nHours" min="0.25" max="168" step="0.5"> ore</label>
+  </fieldset>
+  <fieldset><legend>Avviso canali affollati</legend>
+    <label class="grp"><input type="checkbox" id="nAlert"> Avvisa quando un canale ha piu' di <input type="number" id="nThr" min="1" max="50"> reti sovrapposte</label>
+    <label class="grp">Non ripetere l'avviso prima di <input type="number" id="nCool" min="1" max="1440"> minuti</label>
+    <p class="hint">Si conta il numero sulla barra rossa: reti sopra la soglia "Ignora sotto", unendo gli SSID dello stesso AP. L'avviso si ripete solo se altri canali superano la soglia o se un canale torna sotto e poi di nuovo sopra.</p>
+  </fieldset>
+  <p class="error" id="nError"></p>
+  <div class="actions">
+    <button id="nTest">Invia messaggio di prova</button>
+    <button id="nReportNow">Invia riepilogo adesso</button>
+    <span class="spacer"></span>
+    <button id="nCancel">Annulla</button>
+    <button id="nSave" class="primary">Salva</button>
+  </div>
+</dialog>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+
+// ------------------------------------------------------------------ API
+async function api(path, body) {
+  const opts = body === undefined ? {} : {
+    method: "POST",
+    headers: {"Content-Type": "application/json", "X-Requested-With": "wifi-analyzer"},
+    body: JSON.stringify(body),
+  };
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (body !== undefined) commandEpoch++;  // gli stati richiesti prima del comando sono vecchi
+  if (!r.ok) throw new Error(data.error || `${r.status} ${r.statusText}`);
+  return data;
+}
+let commandEpoch = 0;
+
+// ------------------------------------------------------------------ preferenze di vista (per browser)
+const prefs = Object.assign({font: 11, bands: ["2.4", "5", "6"], util: true, hidden: [], sort: ["rssi", true]},
+  (() => { try { return JSON.parse(localStorage.getItem("wifiAnalyzerPrefs") || "{}"); } catch { return {}; } })());
+function savePrefs() { try { localStorage.setItem("wifiAnalyzerPrefs", JSON.stringify(prefs)); } catch {} }
+
+let state = null, selected = null, built = false;
+let tableKey = "", chartKey = "", lastNotifySeq = null, sliderBusy = false;
+
+function toast(text, kind) {
+  const t = $("toast");
+  t.textContent = text;
+  t.className = `show ${kind || ""}`;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => { t.className = kind || ""; }, kind === "err" ? 8000 : 4000);
+}
+const fail = e => toast(e.message, "err");
+
+// ------------------------------------------------------------------ impostazioni condivise (lato servizio)
+const SETTING_INPUTS = [
+  ["autoScan", "auto_scan", "bool"], ["interval", "interval", "int"], ["saveCsv", "save_csv", "bool"],
+  ["saveDir", "save_dir", "str"], ["minRssi", "min_rssi", "int"], ["group", "group", "bool"],
+  ["pbSpeed", "play_speed", "float"],
+];
+function readInput(el, type) {
+  if (type === "bool") return el.checked;
+  if (type === "str") return el.value;
+  return type === "int" ? parseInt(el.value, 10) : parseFloat(el.value);
+}
+function writeInput(el, type, value) {
+  if (document.activeElement === el) return;  // non sovrascrivere mentre l'utente scrive
+  if (type === "bool") el.checked = value; else el.value = value;
+}
+for (const [id, key, type] of SETTING_INPUTS) {
+  $(id).addEventListener("change", () => {
+    const v = readInput($(id), type);
+    if (type !== "bool" && type !== "str" && Number.isNaN(v)) return;
+    api("/api/settings", {[key]: v}).then(refresh).catch(fail);
+  });
+}
+
+// ------------------------------------------------------------------ costruzione una tantum
+function buildOnce() {
+  for (const [key, title] of state.bands) {
+    const label = document.createElement("label");
+    label.className = "grp";
+    label.innerHTML = `<input type="checkbox"> ${title}`;
+    const box = label.firstChild;
+    box.checked = prefs.bands.includes(key);
+    box.addEventListener("change", () => {
+      prefs.bands = state.bands.map(b => b[0]).filter(k => k === key ? box.checked : prefs.bands.includes(k));
+      savePrefs(); render();
+    });
+    $("bandBoxes").appendChild(label);
+  }
+  for (const s of state.font_sizes) $("fontSize").add(new Option(`${s} pt`, s));
+  $("fontSize").value = prefs.font;
+  buildColumnMenu();
+  applyFont();
+  built = true;
+}
+
+function buildColumnMenu() {
+  const menu = $("colMenu");
+  menu.innerHTML = "";
+  for (const [cid, title] of state.columns) {
+    const label = document.createElement("label");
+    label.className = "grp";
+    label.innerHTML = `<input type="checkbox"> `;
+    label.append(title);
+    const box = label.firstChild;
+    box.checked = !prefs.hidden.includes(cid);
+    box.addEventListener("change", () => {
+      prefs.hidden = box.checked ? prefs.hidden.filter(c => c !== cid) : [...prefs.hidden, cid];
+      if (prefs.hidden.length >= state.columns.length) prefs.hidden = prefs.hidden.filter(c => c !== "ssid");
+      savePrefs(); buildColumnMenu(); render();
+    });
+    menu.appendChild(label);
+  }
+  const all = document.createElement("button");
+  all.textContent = "Mostra tutte";
+  all.addEventListener("click", () => { prefs.hidden = []; savePrefs(); buildColumnMenu(); render(); });
+  menu.appendChild(all);
+}
+
+function applyFont() { document.documentElement.style.setProperty("--fs", `${Math.round(prefs.font * 1.3)}px`); }
+$("fontSize").addEventListener("change", () => { prefs.font = parseInt($("fontSize").value, 10); savePrefs(); applyFont(); render(); });
+$("showUtil").checked = prefs.util;
+$("showUtil").addEventListener("change", () => { prefs.util = $("showUtil").checked; savePrefs(); render(); });
+
+// ------------------------------------------------------------------ rendering
+function render() {
+  if (!state) return;
+  if (!built) buildOnce();
+  const live = state.mode === "live";
+  $("badge").textContent = live ? "LIVE" : "PLAYBACK";
+  $("badge").className = live ? "badge" : "badge pb";
+  $("status").textContent = state.status;
+  document.title = live ? "WiFi Analyzer" : `WiFi Analyzer - Playback`;
+
+  $("liveBar").hidden = !live;
+  $("pbBar").hidden = live;
+  $("btnScan").disabled = state.scanning || !state.scanner;
+  $("btnScan").textContent = state.scanning ? "Scansione..." : "Scansiona ora";
+  $("nextScan").textContent = state.next_scan != null ? `prossima tra ${state.next_scan} s` : "";
+  for (const [id, key, type] of SETTING_INPUTS) writeInput($(id), type, state.settings[key]);
+
+  const pb = state.playback;
+  $("pbSlider").max = Math.max(0, pb.count - 1);
+  if (!sliderBusy) $("pbSlider").value = pb.index;
+  $("pbLabel").textContent = pb.count ? `${pb.index + 1} / ${pb.count}   ${pb.when}` : "";
+  $("pbLabel").title = pb.file;
+  $("btnPlay").innerHTML = pb.playing ? "&#x23F8; Pausa" : "&#x25B6; Play";
+  $("btnLive").disabled = !state.scanner;
+
+  const n = state.notify;
+  if (n.seq) {
+    const label = {report: "riepilogo", alert: "avviso", test: "prova"}[n.kind] || n.kind;
+    $("notifyStatus").textContent = n.ok ? `Teams: ${label} inviato ${n.time}` : `Teams: errore invio ${label}`;
+    $("notifyStatus").className = n.ok ? "ok" : "err";
+    $("notifyStatus").title = n.text;
+    if (lastNotifySeq !== null && n.seq !== lastNotifySeq)
+      toast(n.ok ? `Teams: ${label} inviato (${n.text})` : `Teams: ${n.text}`, n.ok ? "ok" : "err");
+  }
+  lastNotifySeq = n.seq;
+
+  if (selected && !state.rows.some(r => r.id === selected)) selected = null;
+  renderTable();
+  renderChart();
+}
+
+function renderTable() {
+  const key = JSON.stringify([state.version, prefs.hidden, prefs.bands, prefs.sort, selected, state.settings.min_rssi]);
+  if (key === tableKey) return;
+  tableKey = key;
+  const cols = state.columns.map((c, i) => [...c, i]).filter(c => !prefs.hidden.includes(c[0]));
+  const numeric = new Set(state.numeric_columns.concat(["channel", "center", "width"]));
+  const [sortCol, desc] = prefs.sort;
+  const si = state.columns.findIndex(c => c[0] === sortCol);
+
+  const head = $("thead");
+  head.innerHTML = "";
+  for (const [cid, title] of cols) {
+    const th = document.createElement("th");
+    th.textContent = title;
+    if (cid === sortCol) th.className = desc ? "sorted" : "sorted asc";
+    th.addEventListener("click", () => {
+      prefs.sort = cid === sortCol ? [cid, !desc] : [cid, state.numeric_columns.includes(cid)];
+      savePrefs(); render();
+    });
+    head.appendChild(th);
+  }
+
+  const rows = state.rows.filter(r => prefs.bands.includes(r.band));
+  rows.sort((a, b) => {
+    const x = a.sort[si], y = b.sort[si];
+    const c = typeof x === "string" ? x.localeCompare(y) : x - y;
+    return desc ? -c : c;
+  });
+  const body = document.createDocumentFragment();
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    tr.className = r.tag + (r.id === selected ? " sel" : "");
+    for (const [cid, , i] of cols) {
+      const td = document.createElement("td");
+      td.textContent = r.cells[i];
+      if (cid === "detail") td.className = "detail";
+      else if (numeric.has(cid)) td.className = "num";
+      tr.appendChild(td);
+    }
+    tr.addEventListener("click", () => { selected = selected === r.id ? null : r.id; render(); });
+    body.appendChild(tr);
+  }
+  $("tbody").replaceChildren(body);
+}
+
+function renderChart() {
+  const bands = state.bands.map(b => b[0]).filter(k => prefs.bands.includes(k));
+  if (!bands.length) { $("chart").removeAttribute("src"); chartKey = ""; return; }
+  const w = Math.round($("chartWrap").clientWidth - parseFloat(getComputedStyle($("chartWrap")).paddingLeft) * 2);
+  if (w < 200) return;  // layout non ancora pronto: riprova al prossimo aggiornamento
+  const h = chartHeight(bands.length);
+  if (!resizing) $("chart").style.height = `${h}px`;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const q = new URLSearchParams({v: state.version, w, h, dpr, font: prefs.font, bands: bands.join(","),
+                                 util: prefs.util ? 1 : 0, sel: selected || ""});
+  const url = `/api/chart.png?${q}`;
+  if (url === chartKey) return;
+  chartKey = url;
+  const img = new Image();  // precarica: niente sfarfallio durante l'aggiornamento
+  img.onload = () => { if (chartKey === url) $("chart").src = url; };
+  img.src = url;
+}
+let resizeTimer;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderChart, 250); });
+
+// ------------------------------------------------------------------ altezza del grafico regolabile
+const CHART_MIN_H = 200, CHART_MAX_H = 3000;
+// automatica: ~320 px per banda a 11 pt, scalata con la dimensione del testo
+const autoChartHeight = nBands => Math.round((nBands * 320 + 70) * prefs.font / 11);
+const chartHeight = nBands => prefs.chartHeight || autoChartHeight(nBands);
+const clampH = h => Math.round(Math.min(CHART_MAX_H, Math.max(CHART_MIN_H, h)));
+let resizing = false;
+
+function setChartHeight(h) {  // h = null torna all'altezza automatica
+  if (h === null) delete prefs.chartHeight; else prefs.chartHeight = clampH(h);
+  savePrefs();
+  render();
+}
+
+$("chartGrip").addEventListener("pointerdown", e => {
+  e.preventDefault();
+  const grip = $("chartGrip"), img = $("chart");
+  const startY = e.clientY, startH = img.getBoundingClientRect().height;
+  grip.setPointerCapture(e.pointerId);
+  grip.classList.add("drag");
+  document.body.classList.add("resizing");
+  resizing = true;
+  const move = ev => { img.style.height = `${clampH(startH + ev.clientY - startY)}px`; };  // anteprima immediata
+  const up = ev => {
+    grip.removeEventListener("pointermove", move);
+    grip.removeEventListener("pointerup", up);
+    grip.removeEventListener("pointercancel", up);
+    grip.classList.remove("drag");
+    document.body.classList.remove("resizing");
+    resizing = false;
+    if (Math.abs(ev.clientY - startY) >= 3) setChartHeight(startH + ev.clientY - startY);  // nuovo rendering
+    else render();
+  };
+  grip.addEventListener("pointermove", move);
+  grip.addEventListener("pointerup", up);
+  grip.addEventListener("pointercancel", up);
+});
+$("chartGrip").addEventListener("dblclick", () => setChartHeight(null));
+$("chartGrip").addEventListener("keydown", e => {
+  if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+  e.preventDefault();
+  const current = $("chart").getBoundingClientRect().height;
+  setChartHeight(current + (e.key === "ArrowDown" ? 1 : -1) * (e.shiftKey ? 200 : 40));
+});
+
+// ------------------------------------------------------------------ comandi
+$("btnScan").addEventListener("click", () => api("/api/scan", {}).then(refresh).catch(fail));
+$("btnLive").addEventListener("click", () => api("/api/mode", {mode: "live"}).then(refresh).catch(fail));
+for (const b of document.querySelectorAll("[data-pb]"))
+  b.addEventListener("click", () => playback(b.dataset.pb));
+$("btnPlay").addEventListener("click", () => playback(state.playback.playing ? "pause" : "play"));
+function playback(action, index) { return api("/api/playback", {action, index}).then(refresh).catch(fail); }
+
+let seekTimer;
+$("pbSlider").addEventListener("input", () => {
+  sliderBusy = true;
+  clearTimeout(seekTimer);
+  seekTimer = setTimeout(() => playback("seek", parseInt($("pbSlider").value, 10)), 120);
+});
+$("pbSlider").addEventListener("change", () => { sliderBusy = false; });
+
+document.addEventListener("keydown", e => {
+  if (e.target.closest("input, select, textarea, dialog")) return;
+  if (e.key === "Escape" && selected) { selected = null; render(); }
+  if (!state || state.mode !== "playback") return;
+  if (e.key === "ArrowLeft") { e.preventDefault(); playback("prev"); }
+  if (e.key === "ArrowRight") { e.preventDefault(); playback("next"); }
+  if (e.key === " ") { e.preventDefault(); playback(state.playback.playing ? "pause" : "play"); }
+});
+document.addEventListener("click", e => {  // chiude il menu colonne cliccando fuori
+  if (!e.target.closest("#colMenuWrap")) $("colMenuWrap").open = false;
+});
+
+// playback
+$("btnPlayback").addEventListener("click", () => {
+  $("pbDir").value = state.playback.dir || state.settings.save_dir;
+  $("pbError").textContent = "";
+  $("pbDialog").showModal();
+});
+$("pbCancel").addEventListener("click", () => $("pbDialog").close());
+$("pbOpen").addEventListener("click", () => {
+  api("/api/mode", {mode: "playback", dir: $("pbDir").value})
+    .then(() => { $("pbDialog").close(); refresh(); })
+    .catch(e => { $("pbError").textContent = e.message; });
+});
+
+// notifiche
+$("btnNotify").addEventListener("click", () => {
+  const s = state.settings;
+  $("nUrl").value = s.teams_webhook; $("nImage").checked = s.notify_image;
+  $("nReport").checked = s.report_enabled; $("nHours").value = s.report_hours;
+  $("nAlert").checked = s.alert_enabled; $("nThr").value = s.alert_threshold; $("nCool").value = s.alert_cooldown_min;
+  $("nEnvHint").hidden = !state.webhook_from_env;
+  $("nError").textContent = "";
+  $("notifyDialog").showModal();
+});
+function notifyValues() {
+  return {teams_webhook: $("nUrl").value.trim(), notify_image: $("nImage").checked,
+          report_enabled: $("nReport").checked, report_hours: parseFloat($("nHours").value),
+          alert_enabled: $("nAlert").checked, alert_threshold: parseInt($("nThr").value, 10),
+          alert_cooldown_min: parseInt($("nCool").value, 10)};
+}
+const dialogFail = e => { $("nError").textContent = e.message; };
+$("nCancel").addEventListener("click", () => $("notifyDialog").close());
+$("nSave").addEventListener("click", () => {
+  api("/api/settings", notifyValues()).then(() => { $("notifyDialog").close(); toast("Impostazioni notifiche salvate", "ok"); refresh(); }).catch(dialogFail);
+});
+$("nTest").addEventListener("click", () => {
+  const v = notifyValues();
+  $("nError").textContent = "";
+  api("/api/notify", {kind: "test", teams_webhook: v.teams_webhook, notify_image: v.notify_image})
+    .then(() => toast("Invio del messaggio di prova...")).catch(dialogFail);
+});
+$("nReportNow").addEventListener("click", () => {
+  $("nError").textContent = "";
+  api("/api/notify", {kind: "report"}).then(() => toast("Invio del riepilogo...")).catch(dialogFail);
+});
+
+// ------------------------------------------------------------------ aggiornamento periodico
+async function refresh() {
+  try {
+    const epoch = commandEpoch;
+    const next = await api("/api/state");
+    if (epoch !== commandEpoch) return;  // nel frattempo e' partito un comando: arrivera' uno stato nuovo
+    state = next;
+    $("offline").hidden = true;
+    render();
+  } catch (e) {
+    $("offline").hidden = false;
+  }
+}
+(async function loop() { await refresh(); setTimeout(loop, 1000); })();
+</script>
+</body>
+</html>

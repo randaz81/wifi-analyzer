@@ -764,22 +764,31 @@ CSV_FIELDS = ["Data/ora", "SSID", "BSSID", "Banda", "Canale", "Frequenza MHz", "
               "Utilizzo canale %", "Stazioni", "N sovrapposizioni", "Sovrapposta con"]
 
 
+def write_csv(f, nets, when, min_rssi):
+    """Scrive la tabella (una riga per BSSID) sul file di testo f."""
+    compute_overlaps(nets, min_rssi)
+    w = csv.writer(f)
+    w.writerow(CSV_FIELDS)
+    stamp = when.strftime("%Y-%m-%d %H:%M:%S")
+    for n in sorted(nets, key=lambda n: (n.primary_freq, -n.rssi)):
+        w.writerow([stamp, n.ssid, n.bssid, BANDS[n.band]["title"], n.channel,
+                    n.primary_freq, n.width, n.center_freq, n.rssi, n.standard,
+                    f"{n.max_rate:.1f}" if n.max_rate else "", n.nss or "",
+                    n.mcs if n.mcs >= 0 else "", f"{n.util:.1f}" if n.util >= 0 else "",
+                    n.stations_text, len(n.overlaps), overlap_summary(n)])
+
+
+def csv_filename(when):
+    return f"{CSV_PREFIX}{when:%Y-%m-%d_%H-%M-%S}.csv"
+
+
 def save_csv(nets, folder, when, min_rssi):
     """Salva una riga per BSSID; il nome del file contiene data e ora della scansione."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
-    compute_overlaps(nets, min_rssi)
-    path = folder / f"{CSV_PREFIX}{when:%Y-%m-%d_%H-%M-%S}.csv"
+    path = folder / csv_filename(when)
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.writer(f)
-        w.writerow(CSV_FIELDS)
-        stamp = when.strftime("%Y-%m-%d %H:%M:%S")
-        for n in sorted(nets, key=lambda n: (n.primary_freq, -n.rssi)):
-            w.writerow([stamp, n.ssid, n.bssid, BANDS[n.band]["title"], n.channel,
-                        n.primary_freq, n.width, n.center_freq, n.rssi, n.standard,
-                        f"{n.max_rate:.1f}" if n.max_rate else "", n.nss or "",
-                        n.mcs if n.mcs >= 0 else "", f"{n.util:.1f}" if n.util >= 0 else "",
-                        n.stations_text, len(n.overlaps), overlap_summary(n)])
+        write_csv(f, nets, when, min_rssi)
     return path
 
 
@@ -983,6 +992,69 @@ def post_teams(url, message, timeout=20):
         raise RuntimeError(f"Impossibile contattare Teams: {e.reason}") from None
 
 
+class Notifier:
+    """Riepilogo periodico e avviso canali affollati su Teams (usato da GUI e web service).
+
+    on_result(kind, ok, testo) viene chiamata dal thread che esegue l'invio.
+    """
+
+    def __init__(self, settings, on_result):
+        self.settings = settings
+        self.on_result = on_result
+        self.last_report = time.time()  # il primo riepilogo parte dopo N ore
+        self.last_alert = 0.0
+        self.alerted_keys = set()       # canali (banda, ch) gia' segnalati e ancora affollati
+
+    def webhook_url(self):
+        return self.settings["teams_webhook"].strip() or os.environ.get(WEBHOOK_ENV, "").strip()
+
+    def settings_changed(self, old, new):
+        if new.get("report_enabled") and not old.get("report_enabled"):
+            self.last_report = time.time()
+        if new.get("alert_threshold", old.get("alert_threshold")) != old.get("alert_threshold"):
+            self.alerted_keys = set()
+
+    def check(self, raw, min_rssi):
+        """Dopo ogni scansione live: riepilogo periodico e avviso canali affollati."""
+        s = self.settings
+        if not self.webhook_url():
+            return
+        now = time.time()
+        radios = group_radios(raw)
+        compute_overlaps(radios, min_rssi)
+        if s["alert_enabled"]:
+            hot, keys = overlap_hotspots(radios, min_rssi, s["alert_threshold"])
+            self.alerted_keys &= keys  # un canale tornato sotto soglia potra' essere risegnalato
+            if keys - self.alerted_keys and now - self.last_alert >= s["alert_cooldown_min"] * 60:
+                self.last_alert = now
+                self.alerted_keys = keys
+                self.send("alert", radios, min_rssi, hot)
+        if s["report_enabled"] and now - self.last_report >= s["report_hours"] * 3600:
+            self.last_report = now
+            self.send("report", radios, min_rssi)
+
+    def send(self, kind, radios, min_rssi, hot=None, url=None, image=None):
+        """Prepara il messaggio (con il grafico) e lo invia in un thread. False se manca l'URL."""
+        url = url or self.webhook_url()
+        if not url:
+            return False
+        try:
+            message = build_teams_message(kind, radios, datetime.now(), min_rssi, hot,
+                                          self.settings["alert_threshold"],
+                                          self.settings["notify_image"] if image is None else image)
+        except Exception as e:
+            self.on_result(kind, False, f"Errore nella preparazione del messaggio: {e}")
+            return True
+
+        def worker():
+            try:
+                self.on_result(kind, True, post_teams(url, message))
+            except Exception as e:
+                self.on_result(kind, False, str(e))
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+
 # --------------------------------------------------------------------------
 # Grafico
 # --------------------------------------------------------------------------
@@ -1146,7 +1218,8 @@ DEFAULT_SETTINGS = dict(font_size=11, interval=15, min_rssi=-90, group=True, sho
                         teams_webhook="", notify_image=True,
                         report_enabled=False, report_hours=4.0,
                         alert_enabled=False, alert_threshold=4, alert_cooldown_min=30,
-                        save_csv=False, save_dir=str(Path.cwd() / "wifi_logs"), play_speed=1.0)
+                        save_csv=False, save_dir=str(Path.cwd() / "wifi_logs"), play_speed=1.0,
+                        auto_scan=True)
 
 
 def load_settings():
@@ -1189,6 +1262,22 @@ SORT_KEYS = {
 }
 
 
+def row_tag(n, min_rssi):
+    """Colore della riga in tabella: weak / partial / cochannel / ok."""
+    if n.rssi < min_rssi:
+        return "weak"
+    if any(k == "parziale" for _, k, _ in n.overlaps):
+        return "partial"
+    return "cochannel" if n.overlaps else "ok"
+
+
+def row_values(n):
+    """Celle della tabella nello stesso ordine di TABLE_COLUMNS."""
+    return (n.name, n.bssid, BANDS[n.band]["title"], n.channel, f"{n.width} MHz",
+            n.center_freq, n.rssi, n.standard, n.rate_text, n.stream_text,
+            n.util_text, n.stations_text, len(n.overlaps), overlap_summary(n))
+
+
 class App:
     def __init__(self, scanner, settings, playback_dir=None):
         import tkinter as tk
@@ -1214,12 +1303,10 @@ class App:
         self.results = queue.Queue()
         self.pb_files, self.pb_cache, self.pb_index, self.pb_after = [], {}, 0, None
         self.notify_results = queue.Queue()
-        self.last_report = time.time()  # il primo riepilogo parte dopo N ore
-        self.last_alert = 0.0
-        self.alerted_keys = set()       # canali (banda, ch) gia' segnalati e ancora affollati
+        self.notifier = Notifier(settings, lambda *result: self.notify_results.put(result))
 
         self.font_var = tk.IntVar(value=settings["font_size"])
-        self.auto_var = tk.BooleanVar(value=True)
+        self.auto_var = tk.BooleanVar(value=settings["auto_scan"])
         self.interval_var = tk.IntVar(value=settings["interval"])
         self.thr_var = tk.IntVar(value=settings["min_rssi"])
         self.group_var = tk.BooleanVar(value=settings["group"])
@@ -1453,18 +1540,7 @@ class App:
         for n in sorted(self.nets, key=SORT_KEYS[key], reverse=rev):
             if not self.band_vars[n.band].get():
                 continue
-            if n.rssi < thr:
-                tag = "weak"
-            elif any(k == "parziale" for _, k, _ in n.overlaps):
-                tag = "partial"
-            elif n.overlaps:
-                tag = "cochannel"
-            else:
-                tag = "ok"
-            tree.insert("", self.tk.END, iid=n.bssid, tags=(tag,), values=(
-                n.name, n.bssid, BANDS[n.band]["title"], n.channel, f"{n.width} MHz",
-                n.center_freq, n.rssi, n.standard, n.rate_text, n.stream_text,
-                n.util_text, n.stations_text, len(n.overlaps), overlap_summary(n)))
+            tree.insert("", self.tk.END, iid=n.bssid, tags=(row_tag(n, thr),), values=row_values(n))
         if self.selected and tree.exists(self.selected):
             tree.selection_set(self.selected)
 
@@ -1591,51 +1667,17 @@ class App:
         self.root.after(150, self.poll)
 
     # ---------------------------------------------------------------- notifiche
-    def webhook_url(self):
-        return self.settings["teams_webhook"].strip() or os.environ.get(WEBHOOK_ENV, "").strip()
-
     def check_notifications(self):
-        """Dopo ogni scansione live: riepilogo periodico e avviso canali affollati."""
-        s = self.settings
-        if not self.webhook_url():
-            return
-        now, thr = time.time(), self.threshold()
-        radios = group_radios(self.raw)
-        compute_overlaps(radios, thr)
-        if s["alert_enabled"]:
-            hot, keys = overlap_hotspots(radios, thr, s["alert_threshold"])
-            self.alerted_keys &= keys  # un canale tornato sotto soglia potra' essere risegnalato
-            if keys - self.alerted_keys and now - self.last_alert >= s["alert_cooldown_min"] * 60:
-                self.last_alert = now
-                self.alerted_keys = keys
-                self.send_notification("alert", radios, hot)
-        if s["report_enabled"] and now - self.last_report >= s["report_hours"] * 3600:
-            self.last_report = now
-            self.send_notification("report", radios)
+        self.notifier.check(self.raw, self.threshold())
 
-    def send_notification(self, kind, radios=None, hot=None, url=None):
-        url = url or self.webhook_url()
+    def send_notification(self, kind, url=None, image=None):
+        url = url or self.notifier.webhook_url()
         if not url:
             self.messagebox.showwarning("Notifica Teams",
                                         "Configura prima l'URL del webhook in Notifiche > Impostazioni.")
             return
-        if radios is None:
-            radios = group_radios(self.raw)
-        try:  # il messaggio (con il grafico) si prepara qui, l'invio in un thread
-            message = build_teams_message(kind, radios, datetime.now(), self.threshold(), hot,
-                                          self.settings["alert_threshold"],
-                                          self.settings["notify_image"])
-        except Exception as e:
-            self.notify_results.put((kind, False, f"Errore nella preparazione del messaggio: {e}"))
-            return
         self.lbl_notify.config(text="Teams: invio in corso...", foreground="#555555")
-
-        def worker():
-            try:
-                self.notify_results.put((kind, True, post_teams(url, message)))
-            except Exception as e:
-                self.notify_results.put((kind, False, str(e)))
-        threading.Thread(target=worker, daemon=True).start()
+        self.notifier.send(kind, group_radios(self.raw), self.threshold(), url=url, image=image)
 
     def open_notify_dialog(self):
         tk, ttk, s = self.tk, self.ttk, self.settings
@@ -1715,10 +1757,7 @@ class App:
             values = read_values()
             if values is None:
                 return
-            if values["report_enabled"] and not s["report_enabled"]:
-                self.last_report = time.time()
-            if values["alert_threshold"] != s["alert_threshold"]:
-                self.alerted_keys = set()
+            self.notifier.settings_changed(s, values)
             s.update(values)
             store_settings(s)
             win.destroy()
@@ -1731,11 +1770,8 @@ class App:
             if not url:
                 self.messagebox.showwarning("Notifiche", "Inserisci l'URL del webhook.", parent=win)
                 return
-            old = dict(s)
-            s.update(values)  # la prova usa le opzioni del dialogo (es. immagine si/no)
-            self.send_notification("test", url=url)
-            s.clear()
-            s.update(old)
+            # la prova usa le opzioni del dialogo anche se non ancora salvate
+            self.send_notification("test", url=url, image=values["notify_image"])
 
         buttons = ttk.Frame(frm)
         buttons.grid(row=7, column=0, columnspan=4, sticky="e", pady=(14, 0))
@@ -1846,6 +1882,7 @@ class App:
                 pass
         self.settings["group"] = self.group_var.get()
         self.settings["show_util"] = self.util_var.get()
+        self.settings["auto_scan"] = self.auto_var.get()
         store_settings(self.settings)
         if self.scanner is not None and hasattr(self.scanner, "close"):
             self.scanner.close()
@@ -1889,6 +1926,12 @@ def main():
                     help="non unire gli SSID trasmessi dallo stesso AP (solo --snapshot)")
     ap.add_argument("--snapshot", metavar="FILE.png",
                     help="esegue una scansione, salva il grafico ed esce")
+    ap.add_argument("--web", metavar="PORTA", type=int,
+                    help="nessuna finestra: espone l'interfaccia via browser su questa porta")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="indirizzo su cui ascolta --web (default 127.0.0.1, solo questo PC; "
+                         "0.0.0.0 per renderlo raggiungibile dalla rete, protetto da token)")
+    ap.add_argument("--token", help="token di accesso per --web (generato se serve e non indicato)")
     args = ap.parse_args()
 
     settings = load_settings()
@@ -1916,6 +1959,11 @@ def main():
                 print(f"Tabella salvata in {path}")
             run_snapshot(nets, args.snapshot, settings["min_rssi"], not args.no_group,
                          settings["font_size"])
+        elif args.web:
+            # wifi_web importa "wifi_analyzer": deve trovare questo modulo, non ricaricarlo
+            sys.modules.setdefault("wifi_analyzer", sys.modules[__name__])
+            import wifi_web
+            wifi_web.serve(scanner, settings, args.host, args.web, args.token, args.playback)
         else:
             App(scanner, settings, args.playback).run()
     except PermissionError as e:
